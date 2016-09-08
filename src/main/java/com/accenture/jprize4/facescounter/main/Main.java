@@ -106,7 +106,6 @@ public class Main {
         final Mat frame = new Mat();
         final Mat grayFrame = new Mat();
         int absoluteFaceSize = 0;
-        int lastCounter = -1;
         if (videoCapture.isOpened()) {
             Logger.getLogger(Main.class.getName()).log(Level.INFO, "Camera OK!!!");
             int i = 0;
@@ -131,10 +130,9 @@ public class Main {
                         new Size()
                 );
                 final Rect[] rectangles = faceDetections.toArray();
-                if (rectangles.length > 0 && rectangles.length != lastCounter) {                    
+                if (rectangles.length > 0) {                    
                     if (publisher != null) {
                         MONITOR_INFO.setCounter(rectangles.length);
-                        lastCounter = rectangles.length;
                         try {
                             publisher.publish(MONITOR_INFO);
                             Logger.getLogger(Main.class.getName()).log(Level.FINE, "Message sent. {} faces found", rectangles.length);
