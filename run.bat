@@ -1,1 +1,1 @@
-java -Djava.library.path=C:\opencv-3.1.0\build\java\x64 -classpath target\org.eclipse.paho.client.mqttv3-1.0.2.jar;target\opencv-310.jar -jar target\faces-counter-1.0-SNAPSHOT.jar C:/Workspaces/NetBeansProjects/faces-detector/faces-detector.properties
+java -Djava.library.path=C:\path\to\opencv-4.2.0\build\java\x64 -jar target\faces-detector-1.0-SNAPSHOT.jar faces-detector.properties

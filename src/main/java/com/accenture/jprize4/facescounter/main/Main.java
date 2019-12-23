@@ -1,5 +1,6 @@
  package com.accenture.jprize4.facescounter.main;
 
+import com.accenture.jprize4.facescounter.livepreview.LivePreviewFrame;
 import org.opencv.core.Core;
 import org.opencv.core.Mat;
 import org.opencv.core.MatOfRect;
@@ -23,137 +24,173 @@ import org.opencv.core.Size;
 import org.opencv.objdetect.Objdetect;
 
 public class Main {
-    
-    public static final String PATH_IMAGES = System.getProperty("user.home") + File.separator + "Pictures";
+
+    private static final String PATH_IMAGES = System.getProperty("user.home") + File.separator + "Pictures";
     private static final MonitorInfo MONITOR_INFO = new MonitorInfo();
     
     private static Publisher publisher;    
     private static CascadeClassifier cascadeClassifier;
-    private static Boolean flagOutputImages;
-    private static String deviceId;
-    public static File classifierFile;
-    
+    private static Boolean saveOutputImages;
+    private static File classifierFile;
+
+    public static String lastFilename;
+    public static File lastFile;
+
+    public static volatile boolean running;
+
+    public static volatile boolean publisherReady;
+
+    private static LivePreviewFrame application;
+
     public static void main(String[] args) {
+
         if (args.length < 1) {
             Logger.getLogger(Main.class.getName()).log(Level.SEVERE, "Properties file path expected as argument");
         } else {
+            application = new LivePreviewFrame();
+            application.setVisible(true);
+
             final Properties properties = new Properties();
             try {
                 properties.load(new FileInputStream(args[0]));
-                System.out.println("Using the following properties:");
-                properties.list(System.out);
-                deviceId = properties.getProperty("publisher.device.id");
+
                 publisher = PublisherFactory.getInstance().getPublisher(properties.getProperty("publisher.impl"));
-                flagOutputImages = Boolean.valueOf(properties.getProperty("save.frames"));
+
+                String deviceId = properties.getProperty("publisher.device.id");
                 MONITOR_INFO.setId(deviceId);
+
+                saveOutputImages = Boolean.valueOf(properties.getProperty("save.frames"));
                 classifierFile = new File(properties.getProperty("classifier.file"));
-                Logger.getLogger(Main.class.getName()).log(Level.INFO, "Loading opencv native libraries...");
+
+                Logger.getLogger(Main.class.getName()).log(Level.INFO, "Loading OpenCV native interface...");
                 System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
+                Logger.getLogger(Main.class.getName()).log(Level.INFO, "OpenCV native interface ready to work :-)");
             } catch (IOException ex) {
                 Logger.getLogger(Main.class.getName()).log(Level.SEVERE, "Error loading properties file", ex);
             }
-            if (flagOutputImages) {
+
+            if (saveOutputImages) {
+                Logger.getLogger(Main.class.getName()).log(Level.INFO, "Saving analyzed images to target directory: {0}", PATH_IMAGES);
                 final File fileImagePath = new File(PATH_IMAGES);
                 if (!fileImagePath.exists()) {
                     try {
                         fileImagePath.createNewFile();
-                    } catch (IOException ex) {
-                        flagOutputImages = false;
-                        ex.printStackTrace();
-                        Logger.getLogger(Main.class.getName()).log(Level.WARNING, "Unable to create dir: {0}", PATH_IMAGES);
+                    } catch (IOException ioe) {
+                        saveOutputImages = false;
+                        Logger.getLogger(Main.class.getName()).log(Level.WARNING, "Unable to create directory: {0}", ioe.getMessage());
+                        Logger.getLogger(Main.class.getName()).log(Level.WARNING, "->stack trace", ioe);
+                        Logger.getLogger(Main.class.getName()).log(Level.WARNING, "Analyzed images will not be saved");
                     }
                 }
-            }
-            if (flagOutputImages) {
-                System.out.println("Saving images to " + PATH_IMAGES);
             }
             if (classifierFile.exists()) {
                 cascadeClassifier = new CascadeClassifier(classifierFile.getPath());
-                try {
-                    publisher.connect(properties);
-                    Runtime.getRuntime().addShutdownHook(
-                        new Thread() {
-                            @Override
-                            public void run() {
-                                try {
-                                    publisher.close();
-                                } catch (IOException ex) {
-
-                                }
-                            }
-                        }
-                    );
-                    detectFromCam();
-                } catch (Exception ioe) {
-                    Logger.getLogger(Main.class.getName()).log(Level.SEVERE, ioe.getMessage(), ioe);
-                } finally {
-                    try {
-                        publisher.close();
-                    } catch (IOException ex) {
-
-                    }
-                }
             } else {
-                Logger.getLogger(Main.class.getName()).log(Level.SEVERE, "Classfier XML File Not Found !!!");
+                Logger.getLogger(Main.class.getName()).log(Level.SEVERE, "Classifier file not found :-(");
+                return;
             }
+
+            new Thread(() -> openPublisher(properties)).start();
+
+            detectFromCamera();
         }
     }
-    
-    private static void detectFromCam() {
-        Logger.getLogger(Main.class.getName()).log(Level.INFO, "Detecting from cam...");
-        final long lStartTime = System.currentTimeMillis();
+
+    private static void detectFromCamera() {
+        Logger.getLogger(Main.class.getName()).log(Level.INFO, "Initiating connection with camera...");
         final VideoCapture videoCapture = new VideoCapture(0);
-        final Mat frame = new Mat();
-        final Mat grayFrame = new Mat();
-        int absoluteFaceSize = 0;
         if (videoCapture.isOpened()) {
-            Logger.getLogger(Main.class.getName()).log(Level.INFO, "Camera OK!!!");
+            Logger.getLogger(Main.class.getName()).log(Level.INFO, "Camera OK :-)");
+        } else {
+            Logger.getLogger(Main.class.getName()).log(Level.SEVERE, "No camera :-(");
+            return;
+        }
+
+        running = true;
+        new Thread(() -> {
+            Logger.getLogger(Main.class.getName()).log(Level.INFO, "Detection session started");
+            final Mat frame = new Mat();
+            final Mat grayFrame = new Mat();
+            int absoluteFeatureSize = 0;
             int i = 0;
-            while (videoCapture.read(frame)) {
-                Logger.getLogger(Main.class.getName()).log(Level.FINE, "Image read!");
+            while (running && videoCapture.read(frame)) {
+                Logger.getLogger(Main.class.getName()).log(Level.FINE, "Image read - analyzing it...");
                 // convert the frame in grayscale and equalize the histogram to improve the results
                 Imgproc.cvtColor(frame, grayFrame, Imgproc.COLOR_BGR2GRAY);
                 Imgproc.equalizeHist(grayFrame, grayFrame);
-                // set the minimum size of the face to be detected (this required is need in the actual detection function). 
-                // Let’s set the minimum size as the 20% of the frame height
-                if (absoluteFaceSize <= 0) {
-                    absoluteFaceSize = Math.round(grayFrame.rows() * 0.2f);
+                // set the minimum size of the feature to be detected
+                // working threshold is 5% of the frame height
+                if (absoluteFeatureSize <= 0) {
+                    absoluteFeatureSize = Math.round(grayFrame.rows() * 0.05f);
                 }
-                final MatOfRect faceDetections = new MatOfRect();
+                final MatOfRect detectedFeatures = new MatOfRect();
                 cascadeClassifier.detectMultiScale(
-                        grayFrame, 
-                        faceDetections, 
-                        1.1, 
-                        2, 
-                        0 | Objdetect.CASCADE_SCALE_IMAGE, 
-                        new Size(absoluteFaceSize, absoluteFaceSize), 
+                        grayFrame,
+                        detectedFeatures,
+                        1.3, // try 1.05 - 1.3
+                        3, // try 2 - 6
+                        0 | Objdetect.CASCADE_SCALE_IMAGE,
+                        new Size(absoluteFeatureSize, absoluteFeatureSize),
                         new Size()
                 );
-                final Rect[] rectangles = faceDetections.toArray();
-                if (rectangles.length > 0) {                    
-                    if (publisher != null) {
-                        MONITOR_INFO.setCounter(rectangles.length);
-                        try {
-                            publisher.publish(MONITOR_INFO);
-                            Logger.getLogger(Main.class.getName()).log(Level.FINE, "Message sent. {} faces found", rectangles.length);
-                        } catch (IOException ex) {
-                            Logger.getLogger(Main.class.getName()).log(Level.WARNING, "publish fail: {0}",ex.getMessage());
-                        }
-                    }
+                final Rect[] rectangles = detectedFeatures.toArray();
+                final int hits = rectangles.length;
+                Logger.getLogger(Main.class.getName()).log(Level.FINE, "Image analyzed - {0} hits found", hits);
+                if (hits > 0) {
+                    publishDetectionData(hits);
                 }
-                if (flagOutputImages) {                        
-                    saveFrame(i, frame, rectangles);
-                    i ++;
-                }
+                decorateFrame(frame, rectangles);
+                saveFrame(i++, frame);
+                updateLivePreview();
             }
-            
-        } else {
-            Logger.getLogger(Main.class.getName()).log(Level.SEVERE, "No camera");
-        }
-        System.out.println("Detection from cam. Time(ms): " + (System.currentTimeMillis() - lStartTime));
+            Logger.getLogger(Main.class.getName()).log(Level.INFO, "Detection session finished");
+            closePublisher();
+        }).start();
     }
 
-    private static void saveFrame(int i, final Mat frame, Rect[] rectangles) {
+    private static void publishDetectionData(int hits) {
+        if (publisher != null && publisherReady) {
+            MONITOR_INFO.setCounter(hits);
+            try {
+                publisher.publish(MONITOR_INFO);
+                Logger.getLogger(Main.class.getName()).log(Level.FINE, "Message sent: {0} hits found", hits);
+            } catch (IOException ioe) {
+                Logger.getLogger(Main.class.getName()).log(Level.WARNING, "Publish fail: {0}", ioe.getMessage());
+                Logger.getLogger(Main.class.getName()).log(Level.WARNING, "->stack trace", ioe);
+            }
+        }
+    }
+
+    private static void openPublisher(Properties properties) {
+        try {
+            Logger.getLogger(Main.class.getName()).log(Level.INFO, "Publisher expected at URL: {0}", properties.getProperty("publisher.broker.url"));
+            Logger.getLogger(Main.class.getName()).log(Level.INFO, "Opening connection with publisher...");
+            publisher.connect(properties);
+            Logger.getLogger(Main.class.getName()).log(Level.INFO, "Connection with publisher established");
+            publisherReady = true;
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> closePublisher()));
+        } catch (IOException ioe) {
+            Logger.getLogger(Main.class.getName()).log(Level.WARNING, "Unable to connect with publisher: {0}", ioe.getMessage());
+            Logger.getLogger(Main.class.getName()).log(Level.WARNING, "->stack trace", ioe);
+        }
+    }
+
+    private static void closePublisher() {
+        try {
+            if (publisher != null && publisherReady) {
+                Logger.getLogger(Main.class.getName()).log(Level.INFO, "Closing connection with publisher...");
+                publisher.close();
+                Logger.getLogger(Main.class.getName()).log(Level.INFO, "Connection with publisher closed");
+                publisher = null;
+                publisherReady = false;
+            }
+        } catch (IOException ioe) {
+            Logger.getLogger(Main.class.getName()).log(Level.WARNING, "Unable to close publisher: {0}", ioe.getMessage());
+            Logger.getLogger(Main.class.getName()).log(Level.WARNING, "->stack trace", ioe);
+        }
+    }
+
+    private static void decorateFrame(Mat frame, Rect[] rectangles) {
         for (Rect rect : rectangles) {
             Imgproc.rectangle(
                     frame,
@@ -162,8 +199,27 @@ public class Main {
                     new Scalar(0, 255, 0)
             );
         }
-        final String filename = PATH_IMAGES + File.separator + "output" + i + ".png";
-        Logger.getLogger(Main.class.getName()).log(Level.FINE, "Writting to {0}", filename);
-        Imgcodecs.imwrite(filename, frame);
+    }
+
+    private static void saveFrame(int i, Mat frame) {
+        lastFilename = PATH_IMAGES + File.separator + "last.jpg";
+        lastFile = new File(lastFilename);
+        Imgcodecs.imwrite(lastFilename, frame);
+
+        if (saveOutputImages) {
+            final String frameFilename = PATH_IMAGES + File.separator + "output" + i + ".png";
+            Imgcodecs.imwrite(frameFilename, frame);
+            Logger.getLogger(Main.class.getName()).log(Level.FINE, "Analyzed image successfully written to file: {0}", frameFilename);
+        }
+    }
+
+    private static void updateLivePreview() {
+        if (lastFilename != null) {
+            try {
+                application.paintImage(application.loadImage(new FileInputStream(lastFilename)));
+            } catch (IOException ioe) {
+                ioe.printStackTrace();
+            }
+        }
     }
 }
